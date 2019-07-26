@@ -860,13 +860,56 @@ class MainView: NSView, URLSessionDataDelegate, URLSessionDelegate, URLSessionDo
                     
                     if let profile = ProvisioningProfile(filename: useAppBundleProfile ? appBundleProvisioningFilePath : provisioningFile!){
                         if var entitlements = profile.getEntitlementsPlist(tempFolder) {
-                            if let oldAppID = getPlistKey(appBundleInfoPlist, keyName: "CFBundleIdentifier"){
-                                entitlements = entitlements.replacingOccurrences(of: "*", with: oldAppID) as NSString
-                            }
-                            Log.write("–––––––––––––––––––––––\n\(entitlements)")
+                            // OLD LOGIC DOES NOT WORK FOR KEYCHAIN
+//                            if let oldAppID = getPlistKey(appBundleInfoPlist, keyName: "CFBundleIdentifier"){
+//                                entitlements = entitlements.replacingOccurrences(of: "*", with: oldAppID) as NSString
+//                            }
+                            Log.write("––––––––––ENTITLEMENTS FROM NEW PROFILE–––––––––––––\n\(entitlements)")
                             Log.write("–––––––––––––––––––––––")
                             do {
-                                try entitlements.write(toFile: entitlementsPlist, atomically: false, encoding: String.Encoding.utf8.rawValue)
+                            
+                                // First write supported entitlements from the new provisioning profile to a plist file
+                                try entitlements.write(toFile: entitlementsPlist, atomically: true, encoding: String.Encoding.utf8.rawValue)
+                                let oldEntitlementsPlist = tempFolder.stringByAppendingPathComponent("oldEntitlementsPlist.plist")
+                                // Create empty plist file for storing old executable signed entitlements
+                                try "".write(toFile: oldEntitlementsPlist, atomically: true, encoding: .utf8)
+                                
+                                // Run codesign command to get exisiting entitlements from signed app
+                                let arguments = ["-d","--entitlements",":-",appBundlePath]
+                                let newProcess = Process()
+                                newProcess.launchPath = codesignPath
+                                newProcess.arguments = arguments
+
+                                // Store codesign command output to old entitlements plist file
+                                let filehandle = FileHandle.init(forWritingAtPath: oldEntitlementsPlist)
+                                newProcess.standardOutput = filehandle
+
+                                // Executes the commands
+                                newProcess.launch()
+                                newProcess.waitUntilExit()
+                                filehandle?.closeFile()
+                                print(newProcess)
+
+                                // Read old plist and new plist data to dictionary
+                                var oldplist = NSMutableDictionary.init(contentsOfFile: oldEntitlementsPlist)
+                                var newplist = NSMutableDictionary.init(contentsOfFile: entitlementsPlist)
+
+                                // Access keychain values for old and new plist
+                                let keychainkey = "keychain-access-groups"
+                                let teamidkey = "com.apple.developer.team-identifier"
+                                var oldkeychain = oldplist?.value(forKey: keychainkey) as? [String]
+                                var newkeychain = newplist?.value(forKey: keychainkey) as? [String]
+
+                                // Replace keychain access groups old team id with new team id in old plist
+                                let oldteamid = oldplist?.value(forKey: teamidkey) as? String
+                                let newteamid = newplist?.value(forKey: teamidkey) as? String
+                                oldkeychain = oldkeychain?.map{ $0.replacingOccurrences(of: oldteamid ?? "", with: newteamid ?? "") }
+                                
+                                // Finally replace new plist keychain group name with old plist group name to keep it consistent after signing
+                                newplist?.setValue(oldkeychain, forKey: keychainkey)
+                                Log.write("––––––––––RESIGNED APP ENTITLEMENTS DICTIONARY–––––––––––––\n\(newplist)")
+                                newplist?.write(toFile: entitlementsPlist, atomically: true)
+                                
                                 setStatus("Saved entitlements to \(entitlementsPlist)")
                             } catch let error as NSError {
                                 setStatus("Error writing entitlements.plist, \(error.localizedDescription)")
